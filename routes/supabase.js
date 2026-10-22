@@ -150,11 +150,11 @@ async function registrarLog(tipo, usuarioId, usuarioTipo, descripcion, resultado
 router.post('/usuarios', async (req, res) => {
   try {
     const datos = req.body;
-    
+
     console.log('📊 Registrando/actualizando usuario en Supabase...');
     console.log(`   Android ID: ${datos.android_id}`);
     console.log('📦 Campos recibidos:', Object.keys(datos).join(', '));
-    
+
     // ✅ CONSTRUIR EXPLÍCITAMENTE el objeto de datos completos
     const datosCompletosObj = {
       android_id: datos.android_id || 'N/A',
@@ -171,28 +171,33 @@ router.post('/usuarios', async (req, res) => {
       password_hash: datos.password ? await hashPassword(datos.password) : null,
       nombre: datos.nombre || '',
       telefono: datos.telefono || '',
+      // ✅ NUEVOS CAMPOS: asociación con NIE
+      nie: datos.nie || '',
+      nacionalidad: datos.nacionalidad || '',
+      provincia: datos.provincia || '',
+      telefono_cliente: datos.telefonoCliente || datos.telefono_cliente || '',
       estado: datos.estado || 'activo',
       fecha_activacion: datos.fecha_activacion || new Date().toISOString()
     };
-    
+
     // ✅ VERIFICAR SI EL USUARIO YA EXISTE
     const checkResponse = await fetch(
       `${SUPABASE_URL}/rest/v1/usuarios?android_id=eq.${datos.android_id}&select=android_id,estado,password_hash`,
       { headers: getSupabaseHeaders() }
     );
-    
+
     const existingUsers = await checkResponse.json();
     const existe = existingUsers && existingUsers.length > 0;
-    
+
     // ==========================================
     // ✅ VALIDAR CÓDIGO Y PASSWORD
     // ==========================================
     const codigo = datos.codigo_activacion || datos.codigoActivacion || datos.codigo;
-    
+
     // Si es NUEVO y no trae código → RECHAZAR
     if (!existe && !codigo) {
       console.log('❌ Nuevo usuario sin código de activación');
-      
+
       await registrarLog(
         'registro_fallido',
         datos.android_id,
@@ -201,14 +206,14 @@ router.post('/usuarios', async (req, res) => {
         'rechazado',
         { motivo: 'Código no proporcionado' }
       );
-      
+
       return res.status(400).json({
         success: false,
         error: 'Se requiere un código de activación válido para registrarse',
         codigo_requerido: true
       });
     }
-    
+
     // Si es NUEVO y no trae password → RECHAZAR
     if (!existe && !datos.password) {
       console.log('❌ Nuevo usuario sin contraseña');
@@ -218,7 +223,7 @@ router.post('/usuarios', async (req, res) => {
         password_requerida: true
       });
     }
-    
+
     // Si es NUEVO y password muy corto → RECHAZAR
     if (!existe && datos.password && datos.password.length < 6) {
       console.log('❌ Contraseña muy corta');
@@ -228,16 +233,16 @@ router.post('/usuarios', async (req, res) => {
         password_invalida: true
       });
     }
-    
+
     // Si viene un código → VALIDARLO
     if (codigo) {
       console.log(`🔑 Validando código de activación: ${codigo}`);
-      
+
       const validacion = await validarCodigoActivacion(codigo, datos.android_id);
-      
+
       if (!validacion.valido) {
         console.log(`❌ Código inválido: ${validacion.mensaje}`);
-        
+
         await registrarLog(
           'activacion_fallida',
           datos.android_id,
@@ -246,20 +251,20 @@ router.post('/usuarios', async (req, res) => {
           'rechazado',
           { codigo, motivo: validacion.mensaje }
         );
-        
+
         return res.status(400).json({
           success: false,
           error: validacion.mensaje || 'Código de activación inválido',
           codigo_invalido: true
         });
       }
-      
+
       console.log(`✅ Código válido y activado para: ${datos.android_id}`);
-      
+
       // ✅ NUEVO: Setear fecha_uso y fecha_expiracion AL ACTIVAR
       const ahora = new Date();
       const fechaExpiracion = calcularFechaExpiracion(ahora);
-      
+
       await fetch(
         `${SUPABASE_URL}/rest/v1/codigos_activacion?codigo=eq.${codigo}`,
         {
@@ -268,15 +273,15 @@ router.post('/usuarios', async (req, res) => {
           body: JSON.stringify({
             fecha_uso: ahora.toISOString(),
             fecha_expiracion: fechaExpiracion,
-            nies_usados: [],        // ✅ Inicializar array
-            max_nies: 2,             // ✅ Inicializar max_nies
+            nies_usados: [],          // ✅ Inicializar array
+            max_nies: 2,              // ✅ Inicializar max_nies
             ampliaciones_compradas: 0 // ✅ Inicializar contador
           })
         }
       );
-      
+
       console.log(`📅 Código ${codigo} activado. Expira en ${DURACION_DIAS} días: ${fechaExpiracion}`);
-      
+
       await registrarLog(
         'activacion_exitosa',
         datos.android_id,
@@ -291,7 +296,7 @@ router.post('/usuarios', async (req, res) => {
         }
       );
     }
-    
+
     // Verificar si está bloqueado
     if (existe && existingUsers[0].estado === 'bloqueado') {
       return res.status(403).json({
@@ -299,7 +304,7 @@ router.post('/usuarios', async (req, res) => {
         error: 'Usuario bloqueado. Contacta con soporte.'
       });
     }
-    
+
     // Construir el body para Supabase
     const body = {
       android_id: datosCompletosObj.android_id,
@@ -311,6 +316,12 @@ router.post('/usuarios', async (req, res) => {
       password_hash: datosCompletosObj.password_hash,
       nombre: datosCompletosObj.nombre,
       telefono: datosCompletosObj.telefono,
+      // ✅ NUEVOS CAMPOS
+      nie: datosCompletosObj.nie,
+      nacionalidad: datosCompletosObj.nacionalidad,
+      provincia: datosCompletosObj.provincia,
+      telefono_cliente: datosCompletosObj.telefono_cliente,
+      // Fin nuevos campos
       dispositivo: datosCompletosObj.dispositivo,
       producto: datosCompletosObj.producto,
       hardware: datosCompletosObj.hardware,
@@ -320,15 +331,21 @@ router.post('/usuarios', async (req, res) => {
       ultima_conexion: new Date().toISOString(),
       datos_completos: datosCompletosObj
     };
-    
+
     let response;
     if (existe) {
       console.log('📝 Usuario existe, actualizando...');
-      
+
       const updateBody = {
         email: body.email,
         nombre: body.nombre,
         telefono: body.telefono,
+        // ✅ NUEVOS CAMPOS
+        nie: body.nie,
+        nacionalidad: body.nacionalidad,
+        provincia: body.provincia,
+        telefono_cliente: body.telefono_cliente,
+        // Fin nuevos campos
         ultima_conexion: body.ultima_conexion,
         datos_completos: body.datos_completos,
         marca: body.marca,
@@ -341,12 +358,12 @@ router.post('/usuarios', async (req, res) => {
         es_fisico: body.es_fisico,
         fingerprint: body.fingerprint
       };
-      
+
       if (datos.password && datosCompletosObj.password_hash) {
         updateBody.password_hash = datosCompletosObj.password_hash;
         console.log('🔐 Actualizando contraseña con bcrypt');
       }
-      
+
       response = await fetch(
         `${SUPABASE_URL}/rest/v1/usuarios?android_id=eq.${datos.android_id}`,
         {
@@ -357,27 +374,34 @@ router.post('/usuarios', async (req, res) => {
       );
     } else {
       console.log('🆕 Nuevo usuario, creando con bcrypt...');
-      
+
       body.fecha_activacion = datosCompletosObj.fecha_activacion;
-      
+
       response = await fetch(`${SUPABASE_URL}/rest/v1/usuarios`, {
         method: 'POST',
         headers: getSupabaseHeaders(),
         body: JSON.stringify(body)
       });
     }
-    
+
     if (response.status === 201 || response.status === 200 || response.status === 204) {
       await setUserContext(datos.android_id, datos.email, '');
+
+      // ✅ Log para confirmar que el NIE quedó asociado
       console.log('✅ Usuario registrado/actualizado en Supabase');
-      
+      console.log(`   🆔 NIE asociado: ${datosCompletosObj.nie || '(vacío)'}`);
+      console.log(`   🏛️ Nacionalidad: ${datosCompletosObj.nacionalidad || '(vacía)'}`);
+      console.log(`   📍 Provincia: ${datosCompletosObj.provincia || '(vacía)'}`);
+      console.log(`   📱 Tel. cliente: ${datosCompletosObj.telefono_cliente || '(vacío)'}`);
+
       const { password_hash, ...datosSeguros } = datosCompletosObj;
-      
+
       res.json({
         success: true,
         message: existe ? 'Usuario actualizado' : 'Cuenta creada y activada correctamente',
         activado_con_codigo: !!codigo,
-        campos_guardados: Object.keys(datosCompletosObj).length
+        campos_guardados: Object.keys(datosCompletosObj).length,
+        nie_asociado: datosCompletosObj.nie || null
       });
     } else {
       const error = await response.text();
