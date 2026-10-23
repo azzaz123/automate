@@ -132,8 +132,7 @@ router.post('/stripe-webhook', express.raw({ type: 'application/json' }), async 
       console.log('   📦 [WEBHOOK] Tipo de evento:', event.type);
     } catch (err) {
       console.error('   ❌ [WEBHOOK] ERROR DE FIRMA:', err.message);
-      return res.status(200).send(`Webhook Error: ${err.message}`);
-    }
+return res.status(400).send(`Webhook Error: ${err.message}`);    }
 
     if (event.type === 'checkout.session.completed' || event.type === 'v1.checkout.session.completed') {
       
@@ -259,7 +258,7 @@ router.post('/stripe-webhook', express.raw({ type: 'application/json' }), async 
     res.status(200).json({ received: true });
   } catch (error) {
     console.error('❌ [WEBHOOK] Error fatal:', error);
-    res.status(200).json({ error: error.message });
+    res.status(500).json({ error: error.message });
   }
 });
 
