@@ -8,6 +8,7 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
 const fetch = require('node-fetch');
 const path = require('path');
+const fs = require('fs'); // 🔧 NUEVO: para /api/download
 const { Resend } = require('resend');
 require('./cron');
 
@@ -38,6 +39,11 @@ const comandosHistorial = new Map();
 
 const TTL_DISPOSITIVO_MS = 2 * 60 * 1000;
 const TTL_COMANDO_MS = 30 * 1000;
+
+// ==========================================
+// 🔧 NUEVO: MAP PARA TOKENS DE DESCARGA
+// ==========================================
+const downloadTokens = new Map();
 
 // ==========================================
 // ✅ HELPERS FECHA/HORA
@@ -83,17 +89,9 @@ app.use(cors({
 
 // ==========================================
 // 🔧 FIX: WEBHOOKS STRIPE ANTES DE express.json()
-// Deben recibir el body como Buffer (express.raw) y NO ser
-// parseados por express.json() ni afectados por el rateLimit global.
 // ==========================================
 app.post('/api/vendedores/stripe-webhook', express.raw({ type: 'application/json' }), vendedoresRoutes);
 
-// 🔧 FIX: el router de bot ya aplica express.raw en su ruta /stripe-webhook.
-// Lo montamos ANTES de express.json() para que el body llegue como Buffer.
-// (Antes había además una línea duplicada:
-//  app.post('/api/bot/stripe-webhook', express.raw(...), botRoutes);
-//  que montaba el router en una ruta doble /api/bot/stripe-webhook/stripe-webhook
-//  y no servía para nada. Eliminada.)
 app.use('/api/bot', botRoutes);
 
 // ==========================================
@@ -101,6 +99,9 @@ app.use('/api/bot', botRoutes);
 // ==========================================
 app.use('/api/', rateLimit({ windowMs: 15 * 60 * 1000, max: 5000 }));
 app.use(express.json({ limit: '10mb' }));
+
+// ⚠️ NOTA: si quieres que el APK SOLO se pueda descargar con token,
+// comenta o elimina esta línea, y mueve el APK a private/app.apk
 app.use('/downloads', express.static('downloads'));
 
 // ==========================================
@@ -133,6 +134,14 @@ setInterval(() => {
     if (now > d.expiresAt) deviceKeys.delete(id);
   }
 }, 300000);
+
+// 🔧 NUEVO: limpieza periódica de tokens de descarga expirados
+setInterval(() => {
+  const now = Date.now();
+  for (const [token, data] of downloadTokens.entries()) {
+    if (now > data.expira) downloadTokens.delete(token);
+  }
+}, 5 * 60 * 1000);
 
 // ==========================================
 // ✅ MIDDLEWARES AUTH
@@ -1122,13 +1131,95 @@ app.post('/api/cliente/fcm-token', authenticateCliente, express.json(), async (r
 // ==========================================
 // ✅ RUTAS EXTERNAS
 // ==========================================
-// 🔧 NOTA: /api/bot ya está montado arriba (antes de express.json).
-// Aquí solo montamos el resto.
 app.use('/api/supabase', authenticateApiKey, supabaseRoutes);
 app.use('/api/captcha', authenticateApiKey, captchaRoutes);
 app.use('/api/config', configuracionRoutes);
 app.use('/api/notificaciones', authenticateApiKey, notificacionesRoutes);
 app.use('/api/vendedores', (req, res, next) => { req.deviceKeys = deviceKeys; next(); }, vendedoresRoutes);
+
+// ==========================================
+// 🔧 NUEVO: DESCARGA SEGURA DE LA APP (token firmado)
+// ==========================================
+const DOWNLOAD_SECRET = process.env.DOWNLOAD_SECRET;
+const DOWNLOAD_TOKEN_TTL = parseInt(process.env.DOWNLOAD_TOKEN_TTL || '900000'); // 15 min
+const APK_PATH = process.env.APK_PATH || 'downloads/app.apk';
+
+// Endpoint que sirve el APK (con token firmado, caducidad y un solo uso)
+app.get('/api/download/:token', rateLimit({ windowMs: 60 * 1000, max: 10 }), (req, res) => {
+  try {
+    const { token } = req.params;
+
+    if (!DOWNLOAD_SECRET) {
+      console.error('❌ [DOWNLOAD] DOWNLOAD_SECRET no configurado');
+      return res.status(500).json({ error: 'Servicio no configurado' });
+    }
+
+    const [payloadB64, firma] = token.split('.');
+    if (!payloadB64 || !firma) {
+      return res.status(400).json({ error: 'Token inválido' });
+    }
+
+    // Verificar firma HMAC
+    const expected = crypto
+      .createHmac('sha256', DOWNLOAD_SECRET)
+      .update(payloadB64)
+      .digest('base64url');
+
+    if (expected !== firma) {
+      console.log('❌ [DOWNLOAD] Firma inválida');
+      return res.status(403).json({ error: 'Token inválido o manipulado' });
+    }
+
+    // Decodificar payload
+    let payload;
+    try {
+      payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8'));
+    } catch {
+      return res.status(400).json({ error: 'Token corrupto' });
+    }
+
+    // Verificar caducidad
+    if (Date.now() > payload.exp) {
+      console.log(`⏰ [DOWNLOAD] Token expirado para user ${payload.uid}`);
+      return res.status(410).json({ error: 'Enlace expirado. Pide uno nuevo con /descargar' });
+    }
+
+    // Verificar un solo uso
+    const data = downloadTokens.get(token);
+    if (!data || data.usado) {
+      console.log(`⚠️ [DOWNLOAD] Token ya usado o no registrado: ${token.slice(0, 20)}...`);
+      return res.status(410).json({ error: 'Este enlace ya se ha usado. Pide uno nuevo con /descargar' });
+    }
+    data.usado = true;
+
+    // Servir el APK
+    const filePath = path.join(__dirname, APK_PATH);
+    if (!fs.existsSync(filePath)) {
+      console.error(`❌ [DOWNLOAD] APK no encontrado en: ${filePath}`);
+      return res.status(404).json({ error: 'APK no disponible' });
+    }
+
+    console.log(`✅ [DOWNLOAD] Sirviendo APK a user ${payload.uid}`);
+
+    res.setHeader('Content-Type', 'application/vnd.android.package-archive');
+    res.setHeader('Content-Disposition', 'attachment; filename="cita-previa.apk"');
+    res.setHeader('Cache-Control', 'no-store');
+
+    res.sendFile(filePath);
+  } catch (e) {
+    console.error('❌ [DOWNLOAD] Error:', e);
+    res.status(500).json({ error: 'Error interno' });
+  }
+});
+
+// Endpoint interno para que el bot registre el token recién creado (un solo uso)
+app.post('/api/download/register', authenticateApiKey, express.json(), (req, res) => {
+  const { token, exp, uid } = req.body;
+  if (!token || !exp) return res.status(400).json({ error: 'Faltan datos' });
+  downloadTokens.set(token, { usado: false, expira: exp, user_id: uid });
+  console.log(`📝 [DOWNLOAD] Token registrado para user ${uid} (expira en ${Math.round((exp - Date.now()) / 1000)}s)`);
+  res.json({ success: true });
+});
 
 // ==========================================
 // ✅ ROOT / FALLBACKS  (SIEMPRE AL FINAL)
