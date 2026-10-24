@@ -142,7 +142,6 @@ router.post('/stripe-webhook', express.raw({ type: 'application/json' }), async 
 
     // ✅ Procesar el evento thin
     if (event.type === 'v1.checkout.session.completed' || event.type === 'checkout.session.completed') {
-      // En v2, el ID de la sesión viene en related_object.id
       const sessionId = event.related_object?.id || event.data?.object?.id;
       if (!sessionId) {
         console.error('   ❌ [WEBHOOK] No se encontró sessionId en el evento');
@@ -164,7 +163,7 @@ router.post('/stripe-webhook', express.raw({ type: 'application/json' }), async 
         return res.status(200).send('Session retrieve error');
       }
 
-      // ✅ Buscar la compra en Supabase (igual que antes)
+      // ✅ Buscar la compra en Supabase
       const compraRes = await fetch(
         `${SUPABASE_URL}/rest/v1/compras_bot?stripe_session_id=eq.${sessionId}&select=*`,
         { headers: getSupabaseHeaders() }
@@ -181,7 +180,7 @@ router.post('/stripe-webhook', express.raw({ type: 'application/json' }), async 
       const username = compra.username;
       console.log(`   ✅ [WEBHOOK] Compra encontrada. UserId: ${userId} (${username})`);
 
-      // ✅ Generar código (igual que antes)
+      // ✅ Generar código
       let codigoNuevo;
       let intentos = 0;
       while (intentos < 5) {
@@ -217,14 +216,14 @@ router.post('/stripe-webhook', express.raw({ type: 'application/json' }), async 
         }),
       });
 
-      if (insertCodigo.status !== 201) {
+      if (!insertCodigo.ok) {
         console.error(`   ❌ [WEBHOOK] Error insertando código: ${await insertCodigo.text()}`);
         return res.status(200).send('Error guardando código');
       }
 
       console.log(`   ✅ [WEBHOOK] Código ${codigoNuevo} guardado en Supabase.`);
 
-      // ✅ Actualizar compra con el código real
+      // ✅ Actualizar compra
       await fetch(
         `${SUPABASE_URL}/rest/v1/compras_bot?stripe_session_id=eq.${sessionId}`,
         {
