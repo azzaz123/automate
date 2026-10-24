@@ -695,6 +695,7 @@ router.post('/usuarios/verificar-codigo', async (req, res) => {
 // ✅ NUEVO: Obtener info del código activo del usuario
 // ==========================================
 // routes/supabase.js — modificar el GET /mi-codigo/:androidId
+// routes/supabase.js — reemplaza el GET /mi-codigo/:androidId
 router.get('/mi-codigo/:androidId', async (req, res) => {
   try {
     const { androidId } = req.params;
@@ -702,7 +703,9 @@ router.get('/mi-codigo/:androidId', async (req, res) => {
       return res.status(400).json({ success: false, error: 'android_id requerido' });
     }
 
-    // 1. Primero busca el ÚLTIMO código del usuario SIN filtrar por fecha
+    console.log(`🔍 Buscando código de: ${androidId}`);
+
+    // 1. Último código del usuario SIN filtrar por fecha
     const todosRes = await fetch(
       `${SUPABASE_URL}/rest/v1/codigos_activacion?android_id_activado=eq.${androidId}&estado=eq.usado&select=codigo,fecha_uso,fecha_expiracion,estado,nies_usados,max_nies,ampliaciones_compradas&order=fecha_uso.desc&limit=1`,
       { headers: getSupabaseHeaders() }
@@ -711,35 +714,17 @@ router.get('/mi-codigo/:androidId', async (req, res) => {
     const codigoData = todos?.[0];
 
     if (!codigoData) {
-      // Nunca tuvo código
       return res.json({ success: true, data: null, tiene_codigo: false, motivo: 'sin_codigo' });
     }
 
-    // 2. Comprobar si está caducado
+    // 2. ¿Caducado?
     const ahoraMs = Date.now();
     const expiraMs = codigoData.fecha_expiracion
       ? new Date(codigoData.fecha_expiracion).getTime()
       : 0;
     const caducado = expiraMs > 0 && expiraMs < ahoraMs;
 
-    if (caducado) {
-      return res.json({
-        success: true,
-        data: {
-          codigo: codigoData.codigo,
-          fecha_uso: codigoData.fecha_uso,
-          fecha_expiracion: codigoData.fecha_expiracion,
-          nies_usados: codigoData.nies_usados || [],
-          max_nies: codigoData.max_nies || 2,
-          ampliaciones_compradas: codigoData.ampliaciones_compradas || 0,
-        },
-        tiene_codigo: false,          // ⚠️ sigue siendo false → bloquea
-        motivo: 'caducado',           // ✅ pero ahora especificamos
-        caducado: true,
-      });
-    }
-
-    // 3. Código vigente → devuelve info completa
+    // 3. Construir info de NIE (con o sin citas)
     const nies = codigoData.nies_usados || [];
     const niesConCitas = await Promise.all(
       nies.map(async (nie) => {
@@ -756,28 +741,42 @@ router.get('/mi-codigo/:androidId', async (req, res) => {
       })
     );
 
-    res.json({
+    const dataCompleta = {
+      codigo: codigoData.codigo,
+      fecha_uso: codigoData.fecha_uso,
+      fecha_expiracion: codigoData.fecha_expiracion,
+      nies_usados: niesConCitas,
+      total_nies: nies.length,
+      max_nies: codigoData.max_nies || 2,
+      ampliaciones_compradas: codigoData.ampliaciones_compradas || 0,
+      puede_ampliar: (codigoData.ampliaciones_compradas || 0) < 5,
+      bloqueado: nies.length >= (codigoData.max_nies || 2),
+      caducado: caducado,
+    };
+
+    if (caducado) {
+      // ✅ Devolvemos la info para que la app muestre aviso de caducado
+      return res.json({
+        success: true,
+        data: dataCompleta,
+        tiene_codigo: false,
+        motivo: 'caducado',
+        caducado: true,
+      });
+    }
+
+    return res.json({
       success: true,
-      data: {
-        codigo: codigoData.codigo,
-        fecha_uso: codigoData.fecha_uso,
-        fecha_expiracion: codigoData.fecha_expiracion,
-        nies_usados: niesConCitas,
-        total_nies: nies.length,
-        max_nies: codigoData.max_nies || 2,
-        ampliaciones_compradas: codigoData.ampliaciones_compradas || 0,
-        puede_ampliar: (codigoData.ampliaciones_compradas || 0) < 5,
-        bloqueado: nies.length >= (codigoData.max_nies || 2),
-      },
+      data: dataCompleta,
       tiene_codigo: true,
       motivo: 'vigente',
+      caducado: false,
     });
   } catch (error) {
     console.error('❌ Error:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
-
 // ==========================================
 // ✅ NUEVO: Precios de ampliaciones (PÚBLICO)
 // ==========================================
