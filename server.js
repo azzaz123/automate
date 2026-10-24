@@ -81,16 +81,8 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'x-api-key', 'Authorization', 'x-vendedor-email', 'x-vendedor-password'],
 }));
 app.post('/api/vendedores/stripe-webhook', express.raw({ type: 'application/json' }), vendedoresRoutes);
-app.use(
-  '/api/bot',
-  (req, res, next) => {
-    if (req.method === 'POST' && req.path === '/stripe-webhook') {
-      return express.raw({ type: 'application/json' })(req, res, next);
-    }
-    next();
-  },
-  botRoutes
-);
+app.post('/api/bot/stripe-webhook', express.raw({ type: 'application/json' }), botRoutes);
+
 app.use('/api/', rateLimit({ windowMs: 15 * 60 * 1000, max: 5000 }));
 app.use(express.json({ limit: '10mb' }));
 app.use('/downloads', express.static('downloads'));

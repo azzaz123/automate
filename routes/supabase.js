@@ -694,34 +694,52 @@ router.post('/usuarios/verificar-codigo', async (req, res) => {
 // ==========================================
 // ✅ NUEVO: Obtener info del código activo del usuario
 // ==========================================
+// routes/supabase.js — modificar el GET /mi-codigo/:androidId
 router.get('/mi-codigo/:androidId', async (req, res) => {
   try {
     const { androidId } = req.params;
-    
     if (!androidId) {
       return res.status(400).json({ success: false, error: 'android_id requerido' });
     }
-    
-    console.log(`🔍 Buscando código activo de: ${androidId}`);
-    
-    const ahora = new Date().toISOString();
-    const response = await fetch(
-      `${SUPABASE_URL}/rest/v1/codigos_activacion?android_id_activado=eq.${androidId}&estado=eq.usado&fecha_expiracion=gte.${ahora}&select=codigo,fecha_uso,fecha_expiracion,nies_usados,max_nies,ampliaciones_compradas&order=fecha_uso.desc&limit=1`,
+
+    // 1. Primero busca el ÚLTIMO código del usuario SIN filtrar por fecha
+    const todosRes = await fetch(
+      `${SUPABASE_URL}/rest/v1/codigos_activacion?android_id_activado=eq.${androidId}&estado=eq.usado&select=codigo,fecha_uso,fecha_expiracion,estado,nies_usados,max_nies,ampliaciones_compradas&order=fecha_uso.desc&limit=1`,
       { headers: getSupabaseHeaders() }
     );
-    
-    const codigos = await response.json();
-    const codigoData = codigos?.[0];
-    
+    const todos = await todosRes.json();
+    const codigoData = todos?.[0];
+
     if (!codigoData) {
-      return res.json({ 
-        success: true, 
-        data: null,
-        tiene_codigo: false 
+      // Nunca tuvo código
+      return res.json({ success: true, data: null, tiene_codigo: false, motivo: 'sin_codigo' });
+    }
+
+    // 2. Comprobar si está caducado
+    const ahoraMs = Date.now();
+    const expiraMs = codigoData.fecha_expiracion
+      ? new Date(codigoData.fecha_expiracion).getTime()
+      : 0;
+    const caducado = expiraMs > 0 && expiraMs < ahoraMs;
+
+    if (caducado) {
+      return res.json({
+        success: true,
+        data: {
+          codigo: codigoData.codigo,
+          fecha_uso: codigoData.fecha_uso,
+          fecha_expiracion: codigoData.fecha_expiracion,
+          nies_usados: codigoData.nies_usados || [],
+          max_nies: codigoData.max_nies || 2,
+          ampliaciones_compradas: codigoData.ampliaciones_compradas || 0,
+        },
+        tiene_codigo: false,          // ⚠️ sigue siendo false → bloquea
+        motivo: 'caducado',           // ✅ pero ahora especificamos
+        caducado: true,
       });
     }
-    
-    // ✅ Contar citas por NIE
+
+    // 3. Código vigente → devuelve info completa
     const nies = codigoData.nies_usados || [];
     const niesConCitas = await Promise.all(
       nies.map(async (nie) => {
@@ -730,7 +748,6 @@ router.get('/mi-codigo/:androidId', async (req, res) => {
           { headers: getSupabaseHeaders() }
         );
         const citas = await citasResponse.json();
-        
         return {
           nie: nie,
           total_citas: citas.length,
@@ -738,7 +755,7 @@ router.get('/mi-codigo/:androidId', async (req, res) => {
         };
       })
     );
-    
+
     res.json({
       success: true,
       data: {
@@ -752,9 +769,9 @@ router.get('/mi-codigo/:androidId', async (req, res) => {
         puede_ampliar: (codigoData.ampliaciones_compradas || 0) < 5,
         bloqueado: nies.length >= (codigoData.max_nies || 2),
       },
-      tiene_codigo: true
+      tiene_codigo: true,
+      motivo: 'vigente',
     });
-    
   } catch (error) {
     console.error('❌ Error:', error);
     res.status(500).json({ success: false, error: error.message });
