@@ -51,7 +51,6 @@ router.post('/comprar-codigo', authApiKey, express.json(), async (req, res) => {
     const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
     const session = await stripe.checkout.sessions.create({
-      payment_method_types: ['card'],
       line_items: [
         {
           price_data: {
