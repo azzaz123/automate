@@ -116,7 +116,7 @@ router.post('/comprar-codigo', authApiKey, express.json(), async (req, res) => {
 router.post('/stripe-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
   console.log('\n========================================');
   console.log('🚨 [WEBHOOK] ¡Petición recibida de Stripe!');
-  
+
   try {
     const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
     const sig = req.headers['stripe-signature'];
@@ -125,39 +125,53 @@ router.post('/stripe-webhook', express.raw({ type: 'application/json' }), async 
     console.log('   [WEBHOOK] Stripe Signature:', sig ? 'SÍ' : 'NO');
     console.log('   [WEBHOOK] Secret configurado:', webhookSecret ? 'SÍ' : 'NO');
 
-    let event;
-    try {
-      event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret, 600); 
-      console.log('   ✅ [WEBHOOK] Firma verificada.');
-      console.log('   📦 [WEBHOOK] Tipo de evento:', event.type);
-    } catch (err) {
-      console.error('   ❌ [WEBHOOK] ERROR DE FIRMA:', err.message);
-      return res.status(200).send(`Webhook Error: ${err.message}`);
+    if (!sig || !webhookSecret) {
+      return res.status(400).json({ error: 'Falta signature o secret' });
     }
 
-    if (event.type === 'checkout.session.completed' || event.type === 'v1.checkout.session.completed') {
-      
-      let sessionId = null;
-      if (event.data && event.data.object && event.data.object.id) {
-        sessionId = event.data.object.id;
-      } else if (event.related_object && event.related_object.id) {
-        sessionId = event.related_object.id;
-      }
+    // ✅ VALIDACIÓN v2 (Thin Events)
+    let event;
+    try {
+      event = stripe.parseThinEvent(req.body, sig, webhookSecret);
+      console.log('   ✅ [WEBHOOK] Firma v2 verificada.');
+      console.log('   📦 [WEBHOOK] Tipo:', event.type);
+      console.log('   🔗 [WEBHOOK] related_object:', event.related_object);
+    } catch (err) {
+      console.error('   ❌ [WEBHOOK] ERROR DE FIRMA v2:', err.message);
+      return res.status(400).send(`Webhook Error: ${err.message}`);
+    }
 
+    // ✅ Procesar el evento thin
+    if (event.type === 'v1.checkout.session.completed' || event.type === 'checkout.session.completed') {
+      // En v2, el ID de la sesión viene en related_object.id
+      const sessionId = event.related_object?.id || event.data?.object?.id;
       if (!sessionId) {
-        console.error('   ❌ [WEBHOOK] No se encontró el sessionId en el evento.');
+        console.error('   ❌ [WEBHOOK] No se encontró sessionId en el evento');
         return res.status(200).send('No session ID');
       }
 
-      console.log(`   🔍 [WEBHOOK] Procesando sesión de pago: ${sessionId}`);
+      console.log(`   🔍 [WEBHOOK] Procesando sesión: ${sessionId}`);
 
-      // Buscar compra en Supabase
+      // ✅ Obtener la sesión completa desde la API v1
+      let session;
+      try {
+        session = await stripe.checkout.sessions.retrieve(sessionId);
+        console.log('   ✅ [WEBHOOK] Sesión recuperada:', session.id);
+        console.log('   💳 [WEBHOOK] Payment status:', session.payment_status);
+        console.log('   📧 [WEBHOOK] Customer email:', session.customer_details?.email);
+        console.log('   📋 [WEBHOOK] Metadata:', session.metadata);
+      } catch (err) {
+        console.error('   ❌ [WEBHOOK] Error recuperando sesión:', err.message);
+        return res.status(200).send('Session retrieve error');
+      }
+
+      // ✅ Buscar la compra en Supabase (igual que antes)
       const compraRes = await fetch(
         `${SUPABASE_URL}/rest/v1/compras_bot?stripe_session_id=eq.${sessionId}&select=*`,
         { headers: getSupabaseHeaders() }
       );
       const compras = await compraRes.json();
-      
+
       if (!compras || compras.length === 0) {
         console.error(`   ❌ [WEBHOOK] Compra NO encontrada en Supabase para la sesión: ${sessionId}`);
         return res.status(200).send('Compra no encontrada');
@@ -166,10 +180,9 @@ router.post('/stripe-webhook', express.raw({ type: 'application/json' }), async 
       const compra = compras[0];
       const userId = compra.user_id;
       const username = compra.username;
-      
       console.log(`   ✅ [WEBHOOK] Compra encontrada. UserId: ${userId} (${username})`);
 
-      // Generar código
+      // ✅ Generar código (igual que antes)
       let codigoNuevo;
       let intentos = 0;
       while (intentos < 5) {
@@ -183,7 +196,7 @@ router.post('/stripe-webhook', express.raw({ type: 'application/json' }), async 
         intentos++;
       }
 
-      // Insertar código
+      // ✅ Insertar código en Supabase
       console.log(`   💾 [WEBHOOK] Insertando código ${codigoNuevo} en Supabase...`);
       const insertCodigo = await fetch(`${SUPABASE_URL}/rest/v1/codigos_activacion`, {
         method: 'POST',
@@ -206,13 +219,13 @@ router.post('/stripe-webhook', express.raw({ type: 'application/json' }), async 
       });
 
       if (insertCodigo.status !== 201) {
-        console.error(`   ❌ [WEBHOOK] Error insertando código en Supabase: ${await insertCodigo.text()}`);
+        console.error(`   ❌ [WEBHOOK] Error insertando código: ${await insertCodigo.text()}`);
         return res.status(200).send('Error guardando código');
       }
 
       console.log(`   ✅ [WEBHOOK] Código ${codigoNuevo} guardado en Supabase.`);
 
-      // Actualizar compra
+      // ✅ Actualizar compra con el código real
       await fetch(
         `${SUPABASE_URL}/rest/v1/compras_bot?stripe_session_id=eq.${sessionId}`,
         {
@@ -224,11 +237,8 @@ router.post('/stripe-webhook', express.raw({ type: 'application/json' }), async 
 
       console.log(`   🎁 [WEBHOOK] Código generado exitosamente: ${codigoNuevo}`);
 
-      // ==========================================
-      // NOTIFICAR AL BOT DE TELEGRAM
-      // ==========================================
+      // ✅ Avisar al bot de Telegram
       const botUrl = `${process.env.TELEGRAM_BOT_INTERNAL_URL || 'http://localhost:8080'}/api/notify-codigo`;
-      
       console.log(`\n🚀 [CONEXIÓN BOT] Intentando avisar al bot en: ${botUrl}`);
       console.log(`🚀 [CONEXIÓN BOT] Payload: { user_id: "${userId}", codigo: "${codigoNuevo}" }`);
 
@@ -241,15 +251,11 @@ router.post('/stripe-webhook', express.raw({ type: 'application/json' }), async 
           },
           body: JSON.stringify({ user_id: userId, codigo: codigoNuevo }),
         });
-        
         console.log(`✅ [CONEXIÓN BOT] Status HTTP: ${botRes.status}`);
         const botText = await botRes.text();
         console.log(`✅ [CONEXIÓN BOT] Respuesta del bot: ${botText}`);
-        
       } catch (e) {
-        console.error(`❌ [CONEXIÓN BOT] ERROR CRÍTICO: No se pudo conectar al bot.`);
-        console.error(`❌ [CONEXIÓN BOT] Motivo: ${e.message}`);
-        console.error(`❌ [CONEXIÓN BOT] ¿El bot está en el puerto 8080 y accesible desde el Server 2?`);
+        console.error(`❌ [CONEXIÓN BOT] ERROR CRÍTICO: ${e.message}`);
       }
     } else {
       console.log(`   ⚠️ [WEBHOOK] Evento ignorado: ${event.type}`);
@@ -262,7 +268,6 @@ router.post('/stripe-webhook', express.raw({ type: 'application/json' }), async 
     res.status(200).json({ error: error.message });
   }
 });
-
 // ═══════════════════════════════════════════════
 // GET /api/bot/mis-compras/:user_id
 // ═══════════════════════════════════════════════
