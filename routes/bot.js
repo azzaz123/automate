@@ -128,42 +128,27 @@ router.post('/stripe-webhook', express.raw({ type: 'application/json' }), async 
       return res.status(400).json({ error: 'Falta signature o secret' });
     }
 
-    // ✅ VALIDACIÓN v2 (Thin Events)
     let event;
     try {
-      event = stripe.parseThinEvent(req.body, sig, webhookSecret);
-      console.log('   ✅ [WEBHOOK] Firma v2 verificada.');
+      event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret, 600);
+      console.log('   ✅ [WEBHOOK] Firma v1 verificada.');
       console.log('   📦 [WEBHOOK] Tipo:', event.type);
-      console.log('   🔗 [WEBHOOK] related_object:', event.related_object);
     } catch (err) {
-      console.error('   ❌ [WEBHOOK] ERROR DE FIRMA v2:', err.message);
+      console.error('   ❌ [WEBHOOK] ERROR DE FIRMA v1:', err.message);
       return res.status(400).send(`Webhook Error: ${err.message}`);
     }
 
-    // ✅ Procesar el evento thin
-    if (event.type === 'v1.checkout.session.completed' || event.type === 'checkout.session.completed') {
-      const sessionId = event.related_object?.id || event.data?.object?.id;
-      if (!sessionId) {
-        console.error('   ❌ [WEBHOOK] No se encontró sessionId en el evento');
-        return res.status(200).send('No session ID');
-      }
+    if (event.type === 'checkout.session.completed') {
+      const session = event.data.object;   // v1 clásico: la sesión viene completa
+      const sessionId = session.id;
+      const userId = session.metadata?.user_id;
+      const username = session.metadata?.username;
 
-      console.log(`   🔍 [WEBHOOK] Procesando sesión: ${sessionId}`);
+      console.log(`   🔍 [WEBHOOK] Sesión: ${sessionId}`);
+      console.log(`   💳 [WEBHOOK] Payment status: ${session.payment_status}`);
+      console.log(`   📋 [WEBHOOK] Metadata:`, session.metadata);
 
-      // ✅ Obtener la sesión completa desde la API v1
-      let session;
-      try {
-        session = await stripe.checkout.sessions.retrieve(sessionId);
-        console.log('   ✅ [WEBHOOK] Sesión recuperada:', session.id);
-        console.log('   💳 [WEBHOOK] Payment status:', session.payment_status);
-        console.log('   📧 [WEBHOOK] Customer email:', session.customer_details?.email);
-        console.log('   📋 [WEBHOOK] Metadata:', session.metadata);
-      } catch (err) {
-        console.error('   ❌ [WEBHOOK] Error recuperando sesión:', err.message);
-        return res.status(200).send('Session retrieve error');
-      }
-
-      // ✅ Buscar la compra en Supabase
+      // Buscar compra en Supabase
       const compraRes = await fetch(
         `${SUPABASE_URL}/rest/v1/compras_bot?stripe_session_id=eq.${sessionId}&select=*`,
         { headers: getSupabaseHeaders() }
@@ -176,11 +161,11 @@ router.post('/stripe-webhook', express.raw({ type: 'application/json' }), async 
       }
 
       const compra = compras[0];
-      const userId = compra.user_id;
-      const username = compra.username;
-      console.log(`   ✅ [WEBHOOK] Compra encontrada. UserId: ${userId} (${username})`);
+      const userIdFinal = compra.user_id;
+      const usernameFinal = compra.username;
+      console.log(`   ✅ [WEBHOOK] Compra encontrada. UserId: ${userIdFinal} (${usernameFinal})`);
 
-      // ✅ Generar código
+      // Generar código
       let codigoNuevo;
       let intentos = 0;
       while (intentos < 5) {
@@ -194,7 +179,6 @@ router.post('/stripe-webhook', express.raw({ type: 'application/json' }), async 
         intentos++;
       }
 
-      // ✅ Insertar código en Supabase
       console.log(`   💾 [WEBHOOK] Insertando código ${codigoNuevo} en Supabase...`);
       const insertCodigo = await fetch(`${SUPABASE_URL}/rest/v1/codigos_activacion`, {
         method: 'POST',
@@ -209,7 +193,7 @@ router.post('/stripe-webhook', express.raw({ type: 'application/json' }), async 
           max_nies: 2,
           ampliaciones_compradas: 0,
           nies_usados: [],
-          telefono_bot: `tg_${userId}`,
+          telefono_bot: `tg_${userIdFinal}`,
           fecha_envio_bot: new Date().toISOString(),
           stripe_session_id: sessionId,
           stripe_payment_status: 'completed',
@@ -221,9 +205,8 @@ router.post('/stripe-webhook', express.raw({ type: 'application/json' }), async 
         return res.status(200).send('Error guardando código');
       }
 
-      console.log(`   ✅ [WEBHOOK] Código ${codigoNuevo} guardado en Supabase.`);
+      console.log(`   ✅ [WEBHOOK] Código ${codigoNuevo} guardado.`);
 
-      // ✅ Actualizar compra
       await fetch(
         `${SUPABASE_URL}/rest/v1/compras_bot?stripe_session_id=eq.${sessionId}`,
         {
@@ -235,25 +218,19 @@ router.post('/stripe-webhook', express.raw({ type: 'application/json' }), async 
 
       console.log(`   🎁 [WEBHOOK] Código generado exitosamente: ${codigoNuevo}`);
 
-      // ✅ Avisar al bot de Telegram
       const botUrl = `${process.env.TELEGRAM_BOT_INTERNAL_URL || 'http://localhost:8080'}/api/notify-codigo`;
-      console.log(`\n🚀 [CONEXIÓN BOT] Intentando avisar al bot en: ${botUrl}`);
-      console.log(`🚀 [CONEXIÓN BOT] Payload: { user_id: "${userId}", codigo: "${codigoNuevo}" }`);
+      console.log(`🚀 [CONEXIÓN BOT] Avisando al bot en: ${botUrl}`);
 
       try {
         const botRes = await fetch(botUrl, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-api-key': process.env.API_KEY,
-          },
-          body: JSON.stringify({ user_id: userId, codigo: codigoNuevo }),
+          headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.API_KEY },
+          body: JSON.stringify({ user_id: userIdFinal, codigo: codigoNuevo }),
         });
         console.log(`✅ [CONEXIÓN BOT] Status HTTP: ${botRes.status}`);
-        const botText = await botRes.text();
-        console.log(`✅ [CONEXIÓN BOT] Respuesta del bot: ${botText}`);
+        console.log(`✅ [CONEXIÓN BOT] Respuesta: ${await botRes.text()}`);
       } catch (e) {
-        console.error(`❌ [CONEXIÓN BOT] ERROR CRÍTICO: ${e.message}`);
+        console.error(`❌ [CONEXIÓN BOT] ERROR: ${e.message}`);
       }
     } else {
       console.log(`   ⚠️ [WEBHOOK] Evento ignorado: ${event.type}`);
