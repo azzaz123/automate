@@ -111,8 +111,9 @@ router.post('/comprar-codigo', authApiKey, express.json(), async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════
+// POST /api/bot/stripe-webhook
 // ═══════════════════════════════════════════════
-router.post('/bot/stripe-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+router.post('/stripe-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
   console.log('\n========================================');
   console.log('🚨 [WEBHOOK] ¡Petición recibida de Stripe!');
   

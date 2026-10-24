@@ -70,7 +70,7 @@ function formatearHora(hora) {
 }
 
 // ==========================================
-// ✅ MIDDLEWARES
+// ✅ MIDDLEWARES BASE
 // ==========================================
 app.set('trust proxy', 1);
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
@@ -80,13 +80,28 @@ app.use(cors({
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
   allowedHeaders: ['Content-Type', 'x-api-key', 'Authorization', 'x-vendedor-email', 'x-vendedor-password'],
 }));
-app.post('/api/vendedores/stripe-webhook', express.raw({ type: 'application/json' }), vendedoresRoutes);
-app.post('/api/bot/stripe-webhook', express.raw({ type: 'application/json' }), botRoutes);
 
+// ==========================================
+// 🔧 FIX: WEBHOOKS STRIPE ANTES DE express.json()
+// Deben recibir el body como Buffer (express.raw) y NO ser
+// parseados por express.json() ni afectados por el rateLimit global.
+// ==========================================
+app.post('/api/vendedores/stripe-webhook', express.raw({ type: 'application/json' }), vendedoresRoutes);
+
+// 🔧 FIX: el router de bot ya aplica express.raw en su ruta /stripe-webhook.
+// Lo montamos ANTES de express.json() para que el body llegue como Buffer.
+// (Antes había además una línea duplicada:
+//  app.post('/api/bot/stripe-webhook', express.raw(...), botRoutes);
+//  que montaba el router en una ruta doble /api/bot/stripe-webhook/stripe-webhook
+//  y no servía para nada. Eliminada.)
+app.use('/api/bot', botRoutes);
+
+// ==========================================
+// ✅ MIDDLEWARES GENERALES (después de los webhooks)
+// ==========================================
 app.use('/api/', rateLimit({ windowMs: 15 * 60 * 1000, max: 5000 }));
 app.use(express.json({ limit: '10mb' }));
 app.use('/downloads', express.static('downloads'));
-app.use('/api/bot', botRoutes);
 
 // ==========================================
 // ✅ HELPERS JWT / PASSWORD / IP
@@ -1107,6 +1122,8 @@ app.post('/api/cliente/fcm-token', authenticateCliente, express.json(), async (r
 // ==========================================
 // ✅ RUTAS EXTERNAS
 // ==========================================
+// 🔧 NOTA: /api/bot ya está montado arriba (antes de express.json).
+// Aquí solo montamos el resto.
 app.use('/api/supabase', authenticateApiKey, supabaseRoutes);
 app.use('/api/captcha', authenticateApiKey, captchaRoutes);
 app.use('/api/config', configuracionRoutes);
@@ -1116,7 +1133,7 @@ app.use('/api/vendedores', (req, res, next) => { req.deviceKeys = deviceKeys; ne
 // ==========================================
 // ✅ ROOT / FALLBACKS  (SIEMPRE AL FINAL)
 // ==========================================
-app.get('/', (req, res) => res.json({ status: 'online', version: '6.0.0', emails: 'Resend Premium', timestamp: new Date().toISOString() }));
+app.get('/', (req, res) => res.json({ status: 'online', version: '6.0.1', emails: 'Resend Premium', timestamp: new Date().toISOString() }));
 app.use((err, req, res, next) => res.status(500).json({ error: 'Error interno' }));
 app.use((req, res) => res.status(404).json({ error: 'Ruta no encontrada' }));
 
