@@ -84,7 +84,7 @@ router.post('/comprar-codigo', authApiKey, express.json(), async (req, res) => {
             currency: 'eur',
             product_data: {
               name: 'Código Premium - 3 meses',
-              description: 'Código de activación válido por 90 días para 2 NIEs',
+              description: 'Código de activación válido por 90 días',
             },
             unit_amount: PRECIO_CODIGO * 100,
           },
@@ -135,7 +135,211 @@ router.post('/comprar-codigo', authApiKey, express.json(), async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 });
+// ═══════════════════════════════════════════════
+// ⭐ STARS: guardar compra pending
+// ═══════════════════════════════════════════════
+router.post('/stars/pending', authApiKey, express.json(), async (req, res) => {
+  try {
+    const { payload, user_id, username, amount_stars } = req.body;
 
+    if (!payload || !user_id || !amount_stars) {
+      return res.status(400).json({ error: 'Faltan datos' });
+    }
+
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/compras_stars`, {
+      method: 'POST',
+      headers: { ...getSupabaseHeaders(), 'Prefer': 'return=minimal' },
+      body: JSON.stringify({
+        payload,
+        user_id: String(user_id),
+        username: username || '',
+        amount_stars: parseInt(amount_stars),
+        estado: 'pending',
+      }),
+    });
+
+    if (!r.ok) {
+      const errText = await r.text();
+      console.error('❌ [STARS/pending] Error Supabase:', errText);
+      return res.status(500).json({ error: 'Error guardando compra' });
+    }
+
+    console.log(`⭐ [STARS/pending] Compra pending guardada: ${payload}`);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ [STARS/pending] Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════
+// ⭐ STARS: verificar pending (para pre_checkout_query)
+// ═══════════════════════════════════════════════
+router.get('/stars/verificar-pending', authApiKey, async (req, res) => {
+  try {
+    const { payload } = req.query;
+    if (!payload) return res.status(400).json({ valido: false });
+
+    const r = await fetch(
+      `${SUPABASE_URL}/rest/v1/compras_stars?payload=eq.${encodeURIComponent(payload)}&select=id,estado,user_id,amount_stars`,
+      { headers: getSupabaseHeaders() }
+    );
+    const rows = await r.json();
+    const row = rows?.[0];
+
+    if (!row || row.estado !== 'pending') {
+      return res.json({ valido: false });
+    }
+
+    res.json({ valido: true, user_id: row.user_id, amount_stars: row.amount_stars });
+  } catch (err) {
+    console.error('❌ [STARS/verificar-pending] Error:', err);
+    res.status(500).json({ valido: false });
+  }
+});
+
+// ═══════════════════════════════════════════════
+// ⭐ STARS: procesar pago (en successful_payment)
+// ═══════════════════════════════════════════════
+router.post('/stars/procesar-pago', authApiKey, express.json(), async (req, res) => {
+  try {
+    const { payload, user_id, charge_id, amount, currency } = req.body;
+
+    if (!payload || !user_id || !charge_id) {
+      return res.status(400).json({ success: false, error: 'Faltan datos' });
+    }
+
+    // 1. Verificar que la compra existe, está pending, y coincide
+    const checkRes = await fetch(
+      `${SUPABASE_URL}/rest/v1/compras_stars?payload=eq.${encodeURIComponent(payload)}&select=*`,
+      { headers: getSupabaseHeaders() }
+    );
+    const rows = await checkRes.json();
+    const compra = rows?.[0];
+
+    if (!compra) {
+      console.error(`❌ [STARS/procesar] Compra no encontrada: ${payload}`);
+      return res.status(404).json({ success: false, error: 'Compra no encontrada' });
+    }
+
+    if (compra.estado !== 'pending') {
+      console.error(`❌ [STARS/procesar] Compra ya procesada: ${payload} (estado=${compra.estado})`);
+      // Es idempotente: si ya se procesó y tenemos el código, lo devolvemos
+      if (compra.estado === 'entregado' && compra.codigo) {
+        return res.json({ success: true, codigo: compra.codigo, idempotente: true });
+      }
+      return res.status(409).json({ success: false, error: 'Compra ya procesada', estado: compra.estado });
+    }
+
+    if (String(compra.user_id) !== String(user_id)) {
+      console.error(`❌ [STARS/procesar] user_id no coincide: ${compra.user_id} vs ${user_id}`);
+      return res.status(403).json({ success: false, error: 'user_id no coincide' });
+    }
+
+    if (parseInt(compra.amount_stars) !== parseInt(amount)) {
+      console.error(`❌ [STARS/procesar] amount no coincide: ${compra.amount_stars} vs ${amount}`);
+      return res.status(403).json({ success: false, error: 'amount no coincide' });
+    }
+
+    // 2. Marcar como paid ANTES de generar el código (idempotencia)
+    const markPaid = await fetch(
+      `${SUPABASE_URL}/rest/v1/compras_stars?payload=eq.${encodeURIComponent(payload)}&estado=eq.pending`,
+      {
+        method: 'PATCH',
+        headers: { ...getSupabaseHeaders(), 'Prefer': 'return=representation' },
+        body: JSON.stringify({
+          estado: 'paid',
+          telegram_payment_charge_id: charge_id,
+          paid_at: new Date().toISOString(),
+        }),
+      }
+    );
+
+    const patched = await markPaid.json();
+    if (!patched || patched.length === 0) {
+      // Otro proceso ya lo marcó como paid (race condition)
+      console.warn(`⚠️ [STARS/procesar] Race condition detectada para ${payload}`);
+      return res.status(409).json({ success: false, error: 'Compra ya procesada' });
+    }
+
+    console.log(`✅ [STARS/procesar] Compra marcada como paid: ${payload}`);
+
+    // 3. Generar código único
+    let codigoNuevo;
+    let intentos = 0;
+    while (intentos < 5) {
+      codigoNuevo = generarCodigo();
+      const checkCod = await fetch(
+        `${SUPABASE_URL}/rest/v1/codigos_activacion?codigo=eq.${codigoNuevo}&select=id`,
+        { headers: getSupabaseHeaders() }
+      );
+      const existentes = await checkCod.json();
+      if (!existentes || existentes.length === 0) break;
+      intentos++;
+    }
+
+    // 4. Insertar código en codigos_activacion
+    const insertCodigo = await fetch(`${SUPABASE_URL}/rest/v1/codigos_activacion`, {
+      method: 'POST',
+      headers: { ...getSupabaseHeaders(), 'Prefer': 'return=minimal' },
+      body: JSON.stringify({
+        codigo: codigoNuevo,
+        vendedor_id: VENDEDOR_BOT,
+        estado: 'disponible',
+        precio_compra: PRECIO_CODIGO,
+        fecha_compra: new Date().toISOString(),
+        fecha_expiracion: null,
+        max_nies: 2,
+        ampliaciones_compradas: 0,
+        nies_usados: [],
+        telefono_bot: `tg_${compra.user_id}`,
+        fecha_envio_bot: new Date().toISOString(),
+        stripe_session_id: null,
+        stripe_payment_status: 'stars_completed',
+        stars_payload: payload,
+        stars_charge_id: charge_id,
+      }),
+    });
+
+    if (!insertCodigo.ok) {
+      const errText = await insertCodigo.text();
+      console.error(`❌ [STARS/procesar] Error insertando código: ${errText}`);
+      // Marcar como error para que se pueda reintentar manualmente
+      await fetch(
+        `${SUPABASE_URL}/rest/v1/compras_stars?payload=eq.${encodeURIComponent(payload)}`,
+        {
+          method: 'PATCH',
+          headers: { ...getSupabaseHeaders(), 'Prefer': 'return=minimal' },
+          body: JSON.stringify({ estado: 'error' }),
+        }
+      );
+      return res.status(500).json({ success: false, error: 'Error guardando código' });
+    }
+
+    console.log(`✅ [STARS/procesar] Código ${codigoNuevo} guardado en Supabase`);
+
+    // 5. Actualizar compras_stars: código + entregado
+    await fetch(
+      `${SUPABASE_URL}/rest/v1/compras_stars?payload=eq.${encodeURIComponent(payload)}`,
+      {
+        method: 'PATCH',
+        headers: { ...getSupabaseHeaders(), 'Prefer': 'return=minimal' },
+        body: JSON.stringify({
+          estado: 'entregado',
+          codigo: codigoNuevo,
+          entregado_at: new Date().toISOString(),
+        }),
+      }
+    );
+
+    console.log(`🎁 [STARS/procesar] Compra entregada: ${payload} → ${codigoNuevo}`);
+
+    res.json({ success: true, codigo: codigoNuevo });
+  } catch (err) {
+    console.error('❌ [STARS/procesar] Error fatal:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
 // ═══════════════════════════════════════════════
 // POST /api/bot/stripe-webhook
 // ═══════════════════════════════════════════════
