@@ -19,7 +19,8 @@
     "multer": "^2.2.0",
     "node-fetch": "^2.7.0",
     "resend": "^6.12.4",
-    "stripe": "^23.0.1"
+    "stripe": "^23.0.1",
+    "woke-dyno": "^1.0.1"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"
