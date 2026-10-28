@@ -1144,7 +1144,7 @@ app.use('/api/vendedores', (req, res, next) => { req.deviceKeys = deviceKeys; ne
 // ==========================================
 const DOWNLOAD_SECRET = process.env.DOWNLOAD_SECRET;
 const DOWNLOAD_TOKEN_TTL = parseInt(process.env.DOWNLOAD_TOKEN_TTL || '900000'); // 15 min
-const APK_PATH = process.env.APK_PATH || 'downloads/app.apk';
+const APK_PATH = process.env.APK_PATH || 'private/app.apk';
 
 // Endpoint que sirve el APK (con token firmado, caducidad y un solo uso)
 app.get('/api/download/:token', rateLimit({ windowMs: 60 * 1000, max: 10 }), (req, res) => {
