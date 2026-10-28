@@ -10,6 +10,7 @@ const fetch = require('node-fetch');
 const path = require('path');
 const fs = require('fs'); // 🔧 NUEVO: para /api/download
 const { Resend } = require('resend');
+const wokeDyno = require('woke-dyno');
 require('./cron');
 
 const supabaseRoutes = require('./routes/supabase');
@@ -28,6 +29,7 @@ const SALT_ROUNDS = 12;
 const MAX_NIES = parseInt(process.env.MAX_NIES_POR_CODIGO || '2');
 
 const resend = new Resend(process.env.RESEND_API_KEY);
+const SELF_URL = process.env.RENDER_EXTERNAL_URL || 'https://tu-app.onrender.com';
 
 // ==========================================
 // ✅ MAPS EN MEMORIA
@@ -1231,4 +1233,15 @@ app.use((req, res) => res.status(404).json({ error: 'Ruta no encontrada' }));
 // ==========================================
 // 🚀 LISTEN
 // ==========================================
-app.listen(PORT, '0.0.0.0', () => console.log(`🚀 Servidor ${PORT} | 📧 Emails Premium ACTIVADO | 🎯 MAX_NIES=${MAX_NIES}`));
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 Servidor ${PORT} | 📧 Emails Premium ACTIVADO | 🎯 MAX_NIES=${MAX_NIES}`);
+
+  // 💓 Keep-alive para Render (evita que el servicio gratuito se duerma)
+  if (SELF_URL && SELF_URL.startsWith('http')) {
+    const dynoWaker = wokeDyno(SELF_URL);
+    dynoWaker.start();
+    console.log(`💓 Woke-dyno iniciado, ping a: ${SELF_URL}`);
+  } else {
+    console.warn('⚠️ SELF_URL no válida, woke-dyno no iniciado:', SELF_URL);
+  }
+});
