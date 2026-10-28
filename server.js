@@ -10,7 +10,7 @@ const fetch = require('node-fetch');
 const path = require('path');
 const fs = require('fs'); // 🔧 NUEVO: para /api/download
 const { Resend } = require('resend');
-const wokeDyno = require('woke-dyno');
+const wokeDyno = require('woke-dyno').default;
 require('./cron');
 
 const supabaseRoutes = require('./routes/supabase');
